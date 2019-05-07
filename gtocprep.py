@@ -95,7 +95,8 @@ class MgaDsm1base:
 
     """
 
-    def __init__(self, seq, t0, tof, etas, vinf, add_vinf_dep=False, add_vinf_arr=False, multi_objective=False, cw=False):
+    def __init__(self, seq, t0, tof, etas, vinf, add_vinf_dep=False, add_vinf_arr=False, multi_objective=False,
+                 cw=False):
         """
 
         - seq: list of pykep planets defining the encounter sequence. Needs a placeholder as a starting position (will get overwritten.)
@@ -114,12 +115,12 @@ class MgaDsm1base:
                 'All planets in the sequence need to have exactly the same mu_central_body')
 
         # There should be upper and lower bounds for each leg of the sequence
-        if len(tof) != (len(seq) - 1):
-            raise ValueError(
-                'Specify [lower, upper] for each leg of the sequence!')
-        for t in tof:
-            if len(t) != 2:
-                raise ValueError('Each leg needs to specify and upper and lower bound for tof!')
+        # if len(tof) != (len(seq) - 1):
+        #     raise ValueError(
+        #         'Specify [lower, upper] for each leg of the sequence!')
+        # for t in tof:
+        #     if len(t) != 2:
+        #         raise ValueError('Each leg needs to specify and upper and lower bound for tof!')
 
         self._add_vinf_dep = add_vinf_dep
         self._add_vinf_arr = add_vinf_arr
@@ -193,7 +194,7 @@ class MgaDsm1base:
         else:  # flying towards planet
             return E > 0 or (delta_t > period / 2)
 
-    def check_distance(self, r0, v0, t_start, t_end, safe_radius=RADIUS_SATURN*2):
+    def check_distance(self, r0, v0, t_start, t_end, safe_radius=RADIUS_SATURN * 2):
 
         """ Is the periapsis closer than  safe radius, and if so are we passing periapsis? """
 
@@ -208,7 +209,7 @@ class MgaDsm1base:
 
             # propagate flight
             delta_t = t_end - t_start
-            r, v = propagate_lagrangian(r0, v0,  delta_t * DAY2SEC, self.common_mu)
+            r, v = propagate_lagrangian(r0, v0, delta_t * DAY2SEC, self.common_mu)
 
             # get current orbital period [days]
             period = 2 * pi * (a ** 3 / self.common_mu) ** .5 / DAY2SEC
@@ -270,7 +271,7 @@ class MgaDsm1base:
             # Fly-by
             v_outs[i] = fb_prop(v_end_l, v_P[i], rps[i - 1] * self.seq[i].radius, betas[i - 1], self.seq[i].mu_self)
             # checking next leg up to DSM
-            saturn_distance_violated += self.check_distance(r_P[i], v_outs[i], T[i-1], etas[i] * T[i])
+            saturn_distance_violated += self.check_distance(r_P[i], v_outs[i], T[i - 1], etas[i] * T[i])
             # s/c propagation before the DSM
             r, v = propagate_lagrangian(r_P[i], v_outs[i], etas[i] * T[i] * DAY2SEC, self.common_mu)
             # Lambert arc to reach next body
@@ -415,7 +416,6 @@ class MgaDsm1Start(MgaDsm1base):
 
 
 class MgaDsm1Full(MgaDsm1Start):
-
     """ One UDP from start to impact. """
 
     def __init__(self, seq, t0, tof, vinf, anomaly,
@@ -451,8 +451,64 @@ class MgaDsm1Full(MgaDsm1Start):
         J = -arr_vinf ** 2 * m_f * impact_energy_multiplier
 
         objective = J
-        #         print(objective)
         if self._obj_dim == 1:
             return [objective]
         else:
             return [objective, sum(T)]
+
+
+class ImpactLeg(MgaDsm1Full):
+
+    """ Optimizing the last leg: the impact to the final planet of the sequence. """
+
+    def __init__(self, chromosome, T_impact, eta_impact, seq, mass, isp):
+        self.fixed = self.decode_init_chromosome(chromosome)
+        super(ImpactLeg, self).__init__(seq, t0=None, tof=None, vinf=None, anomaly=None,
+                                        impact=True, mass=mass, isp=isp)
+        self.T_impact = T_impact
+        self.eta_impact = eta_impact
+
+    def get_bounds(self):
+        lb = [self.eta_impact[0], self.T_impact[0]]
+        ub = [self.eta_impact[1], self.T_impact[1]]
+        return lb, ub
+
+    @staticmethod
+    def decode_init_chromosome(x):
+        # encoding: [t0, u, v, V_inf, eta0, T0] + [beta, rp1/rV1, eta1, T1]
+        anomaly, t0, u, v, dep_vinf = x[:5]
+        etas = x[5::4]
+        T = x[6::4]
+        betas = x[7::4]
+        rps = x[8::4]
+
+        # getting the fixed part of the chromosome (tour up to last leg)
+        fixed = {'anomaly': anomaly,
+                 't0': t0, 'u': u, 'v': v, 'dep_vinf': dep_vinf,
+                 'etas': list(etas[:-1]),
+                 'T': list(T[:-1]),
+                 'betas': betas,
+                 'rps': rps}
+
+        return fixed
+
+    def decode_state_eval_fitness(self, x, logging=False, plotting=False, ax=None):
+        """ Getting the fixed part, adding the encoded parameters. """
+
+        anomaly, t0, u, v = self.fixed['anomaly'], self.fixed['t0'], self.fixed['u'], self.fixed['v']
+        dep_vinf = self.fixed['dep_vinf']
+        etas = list(self.fixed['etas']) + [x[0]]
+        T = list(self.fixed['T']) + [x[1]]
+        betas = self.fixed['betas']
+        rps = self.fixed['rps']
+
+        pseudo = self.start_planet(anomaly)
+        self.seq[0] = pseudo  # overwriting the initial position!
+
+        decoded = [t0, u, v, dep_vinf, etas, T, betas, rps]
+
+        return self._fitness_impl(decoded, logging=logging, plotting=plotting, ax=ax)
+
+    def get_dv(self, x):
+        DV, T, arr_vinf, lamberts = self.decode_state_eval_fitness(x)
+        return sum(DV)
